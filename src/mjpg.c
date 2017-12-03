@@ -18,6 +18,9 @@
 #  define MAX_STR_LEN 5
 #endif
 
+#define MAX(x, y) (((x) > (y)) ? (x) : (y))
+#define MIN(x, y) (((x) < (y)) ? (x) : (y))
+
 void skip_past_str( struct jpeg_decompress_struct *dec, char *str ) {
   unsigned char *p;
   unsigned int len=strlen(str);
@@ -114,6 +117,10 @@ int mjpg_open(struct mjpg *m, char *name, int type, int dataOrder) {
 int mjpg_open_fd(struct mjpg *m, FILE *fd, int type, int dataOrder) {
   m->fd=fd;
 
+  printf("Opening mjpg as %s --- %s\n",
+          type == IMTYPE_GRAY ? "GRAY" : "COLOR",
+          dataOrder == IMORDER_PLANAR ? "PLANAR" : "INTERLEAVED");
+
   if (dataOrder==IMORDER_PLANAR && type!=IMTYPE_GRAY &&
       type!=IMTYPE_YCbCr) {
     d_printf("MJPG: Can only return raw data in planar format\n");
@@ -130,6 +137,7 @@ int mjpg_open_fd(struct mjpg *m, FILE *fd, int type, int dataOrder) {
 
   jpeg_save_markers(&(m->cameraDecomp),JPEG_COM,100);
 
+  //jpeg_read_header(&m->cameraDecomp, TRUE);
   m->width=-1;
   m->nErr=0;
   m->pixels = NULL;
@@ -188,8 +196,42 @@ int mjpg_next_head(struct mjpg *m) {
   if (m->dataOrder==IMORDER_PLANAR) {
     m->cameraDecomp.raw_data_out=TRUE;
   }
-      
+
+  d_printf("\n\nImage nominal size: %ux%ux%d\n",
+          m->cameraDecomp.image_width,
+          m->cameraDecomp.image_height,
+          m->cameraDecomp.num_components);
+
+  switch (m->cameraDecomp.jpeg_color_space) {
+      case JCS_RGB:
+          d_printf("Nominal color space is RGB\n");
+          break;
+      case JCS_YCbCr:
+          d_printf("Nominal color space is YCbCr\n");
+          break;
+      default:
+          d_printf("Nominal color space is %d\n",
+                  m->cameraDecomp.jpeg_color_space);
+  }
+  
   jpeg_start_decompress(&m->cameraDecomp);
+
+  int w = m->cameraDecomp.output_width,
+      h = m->cameraDecomp.output_height,
+      d = m->cameraDecomp.out_color_components;
+  d_printf("Image Output size: %ux%ux%d = %ld bytes\n",
+          w, h, d, (long)w*h*d);
+
+  d_printf("Max vertical sample: %d == %d\n",
+          m->cameraDecomp.max_v_samp_factor,
+          m->cameraDecomp.comp_info[0].v_samp_factor);
+  d_printf("Max horizontal sample: %d == %d\n",
+          m->cameraDecomp.max_h_samp_factor,
+          m->cameraDecomp.comp_info[0].h_samp_factor);
+  d_printf("With in blocks: %d --> width: %d\n",
+          m->cameraDecomp.comp_info[0].width_in_blocks,
+          m->cameraDecomp.comp_info[0].width_in_blocks*DCTSIZE);
+
   if (m->width==-1) {
     m->width = m->cameraDecomp.output_width;
     m->height = m->cameraDecomp.output_height;
@@ -200,6 +242,7 @@ int mjpg_next_head(struct mjpg *m) {
         JPOOL_PERMANENT,
         m->width*ch,1);
     } else if (m->dataOrder==IMORDER_PLANAR) {
+      // Vi allokerar alltid antalet inkanaler, inte ut??
       for(i=0; i<m->cameraDecomp.num_components; i++) {
         m->cameraBuffer[i] = (*m->cameraDecomp.mem->alloc_sarray)(
           (j_common_ptr) &m->cameraDecomp, 
@@ -285,6 +328,8 @@ int mjpg_next_data(struct mjpg *m) {
     cr=cb+m->width*ch*m->height;
 
     row_stride=m->cameraDecomp.max_v_samp_factor * DCTSIZE;
+    printf("Row stride: %d\n", row_stride);
+
     if (m->cameraDecomp.num_components==1 && ch==1 && m->type==IMTYPE_GRAY) {
       // Greyscale images are fine
     } else if (m->cameraDecomp.num_components!=3 ||
@@ -302,10 +347,15 @@ int mjpg_next_data(struct mjpg *m) {
     
     while (m->cameraDecomp.output_scanline < m->cameraDecomp.output_height) {
     
-      if (jpeg_read_raw_data(&m->cameraDecomp, m->cameraBuffer, row_stride)!=row_stride) {
+      int read;  
+      if ((read = jpeg_read_raw_data(&m->cameraDecomp, m->cameraBuffer, row_stride))!=row_stride) {
         d_printf("MJPG: jpeg_read_raw_data failed");
         return ERROR_FILEFORMAT;
       }
+      printf("Read rows: %d (%d -> %d)\n",
+              read,
+              m->cameraDecomp.output_scanline - read,
+              m->cameraDecomp.output_scanline);
 
       if (m->type==IMTYPE_YCbCr) {
         if (m->cameraDecomp.comp_info[0].v_samp_factor==1) {
@@ -352,7 +402,11 @@ int mjpg_next_data(struct mjpg *m) {
             y+=m->cameraDecomp.comp_info[0].width_in_blocks*DCTSIZE;
           }
         } else {
-          for (i=0; i<2*DCTSIZE; i++) {
+          int limit = MIN(2*DCTSIZE, m->cameraDecomp.output_height - m->cameraDecomp.output_scanline + 2*DCTSIZE);
+          printf("Scanline: %d -> %d\n", 
+                  m->cameraDecomp.output_scanline - 2*DCTSIZE, 
+                  m->cameraDecomp.output_scanline - 2*DCTSIZE + limit);
+          for (i=0; i<limit; i++) {
             memcpy(y,m->cameraBuffer[0][i],
                    m->cameraDecomp.comp_info[0].width_in_blocks*DCTSIZE); 
             y+=m->cameraDecomp.comp_info[0].width_in_blocks*DCTSIZE;
